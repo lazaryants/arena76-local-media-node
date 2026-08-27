@@ -1,0 +1,60 @@
+logLevel: info
+
+rtsp: true
+rtspTransports: [tcp]
+rtspAddress: :8554
+
+rtmp: true
+rtmpAddress: :1935
+
+hls: true
+hlsAddress: :8888
+hlsVariant: lowLatency
+
+webrtc: true
+webrtcAddress: :8889
+
+api: true
+apiAddress: 127.0.0.1:9997
+
+metrics: true
+metricsAddress: 127.0.0.1:9998
+
+srt: false
+moq: false
+
+paths:
+  volleyball1:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.101/live
+    rtspTransport: tcp
+
+  volleyball2:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.102/live
+    rtspTransport: tcp
+
+  volleyball3:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.103/live
+    rtspTransport: tcp
+
+  volleyball4:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.104/live
+    rtspTransport: tcp
+
+  volleyball5:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.105/live
+    rtspTransport: tcp
+
+  volleyball6:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.106/live
+    rtspTransport: tcp
+
+  curling1:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.111/live
+    rtspTransport: tcp
+
+  curling2:
+    source: rtsp://camera-user:CHANGE_ME@192.0.2.112/live
+    rtspTransport: tcp
+
+  volleyball1-h264:
+    source: publisher

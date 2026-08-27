@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.log
+*.pid
+*.tmp
+*.swp
+.pytest_cache/
+.coverage
+build/
+dist/
+
+# Live and generated private configuration
+*.env
+!*.env.example
+mediamtx/mediamtx.yml
+config/private/
+credentials/
+*.before-*
+*.tar.gz

@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+
+import os
+import queue
+import re
+import shlex
+import signal
+import ssl
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gst", "1.0")
+gi.require_version("GLib", "2.0")
+
+from gi.repository import GLib, Gst
+
+
+TARGET_CONFIG_PATH = Path(
+    "/etc/arena76/rtmp-targets.env"
+)
+PREVIEW_CONFIG_PATH = Path(
+    "/etc/arena76/preview-upload.env"
+)
+PREVIEW_STATE_DIR = Path(
+    "/var/lib/arena-stream/previews"
+)
+PREVIEW_ENDPOINT_KEY = (
+    "ARENA_RTMP_PREVIEW_ENDPOINT_BASE"
+)
+PREVIEW_MAX_BYTES = 200 * 1024
+
+CAMERAS = {
+    "1": {
+        "source_path": "curling1",
+        "target_key": "URL7",
+        "field_id": 7,
+    },
+    "2": {
+        "source_path": "curling2",
+        "target_key": "URL8",
+        "field_id": 8,
+    },
+}
+
+
+def load_env(path):
+    values = {}
+
+    for raw_line in path.read_text(
+        encoding="utf-8",
+    ).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if "=" not in line:
+            raise RuntimeError(
+                f"Invalid configuration line in {path}"
+            )
+
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+
+        parsed = shlex.split(
+            raw_value.strip(),
+            comments=False,
+            posix=True,
+        )
+        if len(parsed) != 1:
+            raise RuntimeError(
+                f"Invalid value for {key} in {path}"
+            )
+
+        values[key] = parsed[0]
+
+    return values
+
+
+def sanitize(message, secrets):
+    result = str(message)
+
+    for secret in secrets:
+        if secret:
+            result = result.replace(
+                secret,
+                "[MEDIA URL HIDDEN]",
+            )
+
+    result = re.sub(
+        r"(?:rtmps?|rtsp|srt)://[^\s]+",
+        "MEDIA_URL://HIDDEN",
+        result,
+    )
+    return result
+
+
+class PreviewUploader:
+    def __init__(
+        self,
+        field_id,
+        token,
+        endpoint_base,
+    ):
+        self.field_id = field_id
+        self.token = token
+        self.endpoint = (
+            f"{endpoint_base}/"
+            f"{field_id}.jpg"
+        )
+        self.output_path = (
+            PREVIEW_STATE_DIR
+            / f"place{field_id}.jpg"
+        )
+        self.frames = queue.Queue(maxsize=1)
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"preview-uploader-{field_id}",
+            daemon=True,
+        )
+        self.success_reported = False
+        self.last_error = None
+        # Reuse one TLS context for the lifetime of the worker.
+        # Creating and freeing a context every two seconds can trigger
+        # an OpenSSL/Python 3.14 allocator failure after many hours.
+        self.ssl_context = ssl.create_default_context()
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stopping.set()
+        self.thread.join(timeout=3)
+
+    def submit(self, payload):
+        try:
+            self.frames.put_nowait(payload)
+            return
+        except queue.Full:
+            pass
+
+        try:
+            self.frames.get_nowait()
+        except queue.Empty:
+            pass
+
+        try:
+            self.frames.put_nowait(payload)
+        except queue.Full:
+            pass
+
+    def _store_local(self, payload):
+        PREVIEW_STATE_DIR.mkdir(
+            parents=True,
+            exist_ok=True,
+            mode=0o750,
+        )
+
+        temporary = self.output_path.with_suffix(
+            ".jpg.tmp"
+        )
+        temporary.write_bytes(payload)
+        temporary.chmod(0o640)
+        os.replace(
+            temporary,
+            self.output_path,
+        )
+
+    def _upload(self, payload):
+        request = urllib.request.Request(
+            self.endpoint,
+            data=payload,
+            method="PUT",
+            headers={
+                "Authorization":
+                    f"Bearer {self.token}",
+                "Content-Type": "image/jpeg",
+                "Content-Length":
+                    str(len(payload)),
+                "User-Agent":
+                    "arena76-preview-uploader/1",
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=10,
+            context=self.ssl_context,
+        ) as response:
+            if response.status not in (200, 204):
+                raise RuntimeError(
+                    "Unexpected preview response: "
+                    f"HTTP {response.status}"
+                )
+
+    def _run(self):
+        while not self.stopping.is_set():
+            try:
+                payload = self.frames.get(
+                    timeout=0.5,
+                )
+            except queue.Empty:
+                continue
+
+            while True:
+                try:
+                    payload = self.frames.get_nowait()
+                except queue.Empty:
+                    break
+
+            if len(payload) > PREVIEW_MAX_BYTES:
+                error_text = (
+                    "JPEG exceeds receiver limit"
+                )
+                if error_text != self.last_error:
+                    print(
+                        f"Preview {self.field_id}: "
+                        f"{error_text}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    self.last_error = error_text
+                continue
+
+            if not (
+                payload.startswith(b"\xff\xd8")
+                and payload.endswith(b"\xff\xd9")
+            ):
+                error_text = "invalid JPEG frame"
+                if error_text != self.last_error:
+                    print(
+                        f"Preview {self.field_id}: "
+                        f"{error_text}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    self.last_error = error_text
+                continue
+
+            try:
+                self._store_local(payload)
+                self._upload(payload)
+
+                if (
+                    not self.success_reported
+                    or self.last_error is not None
+                ):
+                    print(
+                        f"Preview {self.field_id}: "
+                        f"upload active, "
+                        f"{len(payload)} bytes",
+                        flush=True,
+                    )
+
+                self.success_reported = True
+                self.last_error = None
+
+            except Exception as error:
+                error_text = (
+                    f"{type(error).__name__}: "
+                    f"{error}"
+                )
+                if error_text != self.last_error:
+                    print(
+                        f"Preview {self.field_id}: "
+                        f"upload failed: {error_text}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    self.last_error = error_text
+
+
+def main():
+    if len(sys.argv) not in (2, 3):
+        print(
+            "Usage: arena-curling-worker "
+            "<1|2> [--check]",
+            file=sys.stderr,
+        )
+        return 2
+
+    camera_number = sys.argv[1]
+    check_only = (
+        len(sys.argv) == 3
+        and sys.argv[2] == "--check"
+    )
+
+    if camera_number not in CAMERAS:
+        print(
+            f"Invalid curling camera: "
+            f"{camera_number}",
+            file=sys.stderr,
+        )
+        return 2
+
+    camera = CAMERAS[camera_number]
+    targets = load_env(TARGET_CONFIG_PATH)
+    preview_config = load_env(
+        PREVIEW_CONFIG_PATH
+    )
+
+    target_key = camera["target_key"]
+    if target_key not in targets:
+        raise RuntimeError(
+            f"{target_key} is missing from "
+            f"{TARGET_CONFIG_PATH}"
+        )
+
+    token = preview_config.get(
+        "ARENA_RTMP_PREVIEW_UPLOAD_TOKEN",
+        "",
+    )
+    if len(token) < 32:
+        raise RuntimeError(
+            "Preview upload token is unavailable"
+        )
+
+    endpoint_base = preview_config.get(
+        PREVIEW_ENDPOINT_KEY,
+        "",
+    ).rstrip("/")
+    parsed_endpoint = urllib.parse.urlsplit(
+        endpoint_base
+    )
+    if (
+        parsed_endpoint.scheme != "https"
+        or not parsed_endpoint.hostname
+        or parsed_endpoint.username is not None
+        or parsed_endpoint.password is not None
+        or parsed_endpoint.query
+        or parsed_endpoint.fragment
+    ):
+        raise RuntimeError(
+            "Preview endpoint must be a clean HTTPS URL"
+        )
+
+    source_url = (
+        "rtsp://127.0.0.1:8554/"
+        + camera["source_path"]
+    )
+    target_url = targets[target_key]
+    field_id = camera["field_id"]
+
+    secrets = (
+        source_url,
+        target_url,
+        token,
+    )
+
+    Gst.init(None)
+
+    pipeline_description = """
+        rtspsrc
+            protocols=tcp
+            latency=500
+            tcp-timeout=10000000
+            name=src
+
+        flvmux
+            name=mux
+            streamable=true
+        ! rtmpsink
+            name=output
+
+        src.
+        ! application/x-rtp,
+            media=video,
+            payload=98,
+            encoding-name=H265
+        ! queue
+        ! rtph265depay
+        ! h265parse
+        ! nvh265dec
+        ! tee
+            name=decoded
+
+        decoded.
+        ! queue
+        ! nvh264enc
+            preset=p4
+            rc-mode=cbr
+            bitrate=6000
+            gop-size=60
+            zerolatency=true
+        ! video/x-h264,profile=high
+        ! h264parse
+            config-interval=-1
+        ! queue
+        ! mux.
+
+        decoded.
+        ! queue
+            leaky=downstream
+            max-size-buffers=1
+        ! videorate
+            drop-only=true
+        ! video/x-raw,framerate=1/2
+        ! videoscale
+        ! videoconvert
+        ! video/x-raw,
+            format=I420,
+            width=640,
+            height=360,
+            pixel-aspect-ratio=1/1
+        ! jpegenc
+            quality=75
+        ! appsink
+            name=preview
+            emit-signals=true
+            max-buffers=1
+            drop=true
+            sync=false
+
+        src.
+        ! application/x-rtp,
+            media=audio,
+            payload=97,
+            encoding-name=MPEG4-GENERIC
+        ! queue
+        ! rtpmp4gdepay
+        ! aacparse
+        ! queue
+        ! mux.
+    """
+
+    pipeline = Gst.parse_launch(
+        pipeline_description
+    )
+
+    source = pipeline.get_by_name("src")
+    output = pipeline.get_by_name("output")
+    preview_sink = pipeline.get_by_name(
+        "preview"
+    )
+
+    if (
+        source is None
+        or output is None
+        or preview_sink is None
+    ):
+        raise RuntimeError(
+            "Required GStreamer elements "
+            "were not created"
+        )
+
+    # Media URLs are assigned through the API.
+    # They never appear in the process command line.
+    source.set_property(
+        "location",
+        source_url,
+    )
+    output.set_property(
+        "location",
+        target_url,
+    )
+
+    if check_only:
+        print(
+            "Configuration and preview pipeline "
+            "are valid for curling camera "
+            f"{camera_number}"
+        )
+        pipeline.set_state(Gst.State.NULL)
+        return 0
+
+    uploader = PreviewUploader(
+        field_id,
+        token,
+        endpoint_base,
+    )
+
+    # A JPEG sample proves that the RTSP source, decoder and both
+    # branches of the pipeline are continuing to make progress.
+    media_progress_lock = threading.Lock()
+    media_progress = {
+        "started_at": time.monotonic(),
+        "last_frame_at": None,
+    }
+
+    def preview_sample(sink):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.ERROR
+
+        buffer = sample.get_buffer()
+        if buffer is None:
+            return Gst.FlowReturn.ERROR
+
+        mapped, map_info = buffer.map(
+            Gst.MapFlags.READ
+        )
+        if not mapped:
+            return Gst.FlowReturn.ERROR
+
+        try:
+            payload = bytes(map_info.data)
+        finally:
+            buffer.unmap(map_info)
+
+        with media_progress_lock:
+            media_progress["last_frame_at"] = (
+                time.monotonic()
+            )
+
+        uploader.submit(payload)
+        return Gst.FlowReturn.OK
+
+    preview_sink.connect(
+        "new-sample",
+        preview_sample,
+    )
+    uploader.start()
+
+    loop = GLib.MainLoop()
+    bus = pipeline.get_bus()
+    bus.add_signal_watch()
+    stopping = False
+
+    def media_progress_watchdog():
+        if stopping:
+            return False
+
+        now = time.monotonic()
+        with media_progress_lock:
+            started_at = media_progress["started_at"]
+            last_frame_at = media_progress["last_frame_at"]
+
+        if last_frame_at is None:
+            elapsed = now - started_at
+            limit = 45
+            reason = "no decoded frame after startup"
+        else:
+            elapsed = now - last_frame_at
+            limit = 30
+            reason = "decoded frames stopped"
+
+        if elapsed <= limit:
+            return True
+
+        print(
+            "Media progress watchdog: "
+            f"{reason} for {elapsed:.1f}s; "
+            "terminating worker",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        # GStreamer cleanup can itself hang when an output branch
+        # is blocked. Let systemd start a completely new process.
+        os._exit(1)
+
+    GLib.timeout_add_seconds(
+        5,
+        media_progress_watchdog,
+    )
+
+    def stop_pipeline():
+        nonlocal stopping
+        if stopping:
+            return False
+
+        stopping = True
+        print(
+            "Stopping pipeline gracefully",
+            flush=True,
+        )
+        pipeline.send_event(
+            Gst.Event.new_eos()
+        )
+        return False
+
+    def signal_handler(signum, frame):
+        GLib.idle_add(stop_pipeline)
+
+    signal.signal(
+        signal.SIGINT,
+        signal_handler,
+    )
+    signal.signal(
+        signal.SIGTERM,
+        signal_handler,
+    )
+
+    def bus_message(bus, message):
+        message_type = message.type
+
+        if message_type == Gst.MessageType.ERROR:
+            error, debug = message.parse_error()
+
+            print(
+                "GStreamer error:",
+                sanitize(
+                    error.message,
+                    secrets,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            if debug:
+                print(
+                    "GStreamer debug:",
+                    sanitize(
+                        debug,
+                        secrets,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            # A failed RTMP sink can make transition to NULL
+            # block forever inside GStreamer. Terminate the
+            # process immediately and let systemd recreate the
+            # complete pipeline with clean sockets and CUDA state.
+            print(
+                "Fatal pipeline error; "
+                "exiting for automatic restart",
+                file=sys.stderr,
+                flush=True,
+            )
+            os._exit(1)
+
+        elif message_type == Gst.MessageType.EOS:
+            print(
+                "Pipeline reached EOS",
+                flush=True,
+            )
+            loop.quit()
+
+    bus.connect(
+        "message",
+        bus_message,
+    )
+
+    print(
+        f"Starting curling camera "
+        f"{camera_number} with JPEG preview",
+        flush=True,
+    )
+
+    result = pipeline.set_state(
+        Gst.State.PLAYING
+    )
+    if result == Gst.StateChangeReturn.FAILURE:
+        raise RuntimeError(
+            "Unable to start GStreamer pipeline"
+        )
+
+    try:
+        loop.run()
+    finally:
+        pipeline.set_state(
+            Gst.State.NULL
+        )
+        bus.remove_signal_watch()
+        uploader.stop()
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(
+            "Worker failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
