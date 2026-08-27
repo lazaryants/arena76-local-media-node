@@ -192,6 +192,7 @@ class RepositoryTests(unittest.TestCase):
 
     def test_no_generated_or_backup_files_are_required(self):
         required_files = {
+            "docs/PRODUCTION_BASELINE.md",
             "workers/arena-curling-worker",
             "workers/arena-volleyball-worker",
             "workers/srt-worker.py",

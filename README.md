@@ -61,7 +61,9 @@ Production values remain in protected files below `/etc/arena76`,
 
 The validator is read-only. See [deployment](docs/DEPLOYMENT.md),
 [operations](docs/OPERATIONS.md), [security](docs/SECURITY.md) and the
-[architecture](docs/ARCHITECTURE.md).
+[architecture](docs/ARCHITECTURE.md). The audited differences between the
+running host and this candidate are recorded in the
+[production baseline](docs/PRODUCTION_BASELINE.md).
 
 When GStreamer is installed, validation also requires all runtime and NVIDIA
 elements used by the workers. On a source-only workstation that check is
