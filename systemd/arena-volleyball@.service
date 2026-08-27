@@ -1,0 +1,41 @@
+[Unit]
+Description=Arena76 volleyball camera %i to RTMP
+Wants=network-online.target
+After=network-online.target mediamtx.service
+Requires=mediamtx.service
+
+[Service]
+Type=simple
+User=arena-stream
+Group=arena-stream
+SupplementaryGroups=arena76-stream
+Environment=HOME=/var/lib/arena-stream
+Environment=XDG_CACHE_HOME=/var/cache/arena-stream
+Environment=XDG_CONFIG_HOME=/var/lib/arena-stream/config
+
+ExecStart=/usr/local/sbin/arena-volleyball-worker %i
+
+Restart=always
+RestartSec=5s
+
+TimeoutStopSec=10s
+KillSignal=SIGINT
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/arena-stream /var/cache/arena-stream
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

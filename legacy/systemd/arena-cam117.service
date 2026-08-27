@@ -1,0 +1,16 @@
+[Unit]
+Description=Arena76 camera 117 to RTMP place8
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lazaryants
+ExecStart=/home/lazaryants/arena76-streams/cam117-place8.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

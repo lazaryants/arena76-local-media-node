@@ -1,0 +1,39 @@
+[Unit]
+Description=Route Arena76 MediaMTX traffic outside user VPN
+Wants=network-online.target
+After=network-online.target
+Before=arena-volleyball@1.service
+Before=arena-volleyball@2.service
+Before=arena-volleyball@3.service
+Before=arena-volleyball@4.service
+Before=arena-volleyball@5.service
+Before=arena-volleyball@6.service
+Before=arena-curling@1.service
+Before=arena-curling@2.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/arena76/direct-route.env
+ExecStart=/usr/local/lib/arena76/direct-route.sh start
+ExecStop=/usr/local/lib/arena76/direct-route.sh stop
+RemainAfterExit=yes
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
