@@ -61,8 +61,15 @@ VERIFY_OUTPUT="$(
 )"
 printf '%s\n' "${VERIFY_OUTPUT}"
 
-UNEXPECTED_VERIFY_OUTPUT="$(
+PROJECT_VERIFY_OUTPUT="$(
     printf '%s\n' "${VERIFY_OUTPUT}" \
+        | grep -E \
+            '(arena-curling@[^ :/]*\.service|arena-mediamtx-direct-route\.service|arena-srt@[^ :/]*\.service|arena-volleyball@[^ :/]*\.service|mediamtx\.service)' \
+        || true
+)"
+
+UNEXPECTED_VERIFY_OUTPUT="$(
+    printf '%s\n' "${PROJECT_VERIFY_OUTPUT}" \
         | grep -vE \
             'Command /usr/local/.+ is not executable: No such file or directory' \
         || true

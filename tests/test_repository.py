@@ -205,6 +205,24 @@ class RepositoryTests(unittest.TestCase):
         for relative_path in required_files:
             self.assertTrue((ROOT / relative_path).is_file())
 
+    def test_validator_scopes_systemd_diagnostics(self):
+        text = read("scripts/validate.sh")
+
+        self.assertIn("PROJECT_VERIFY_OUTPUT", text)
+        for unit_name in (
+            "arena-curling@",
+            "arena-mediamtx-direct-route",
+            "arena-srt@",
+            "arena-volleyball@",
+            "mediamtx",
+        ):
+            self.assertIn(unit_name, text)
+
+        self.assertIn(
+            'printf \'%s\\n\' "${PROJECT_VERIFY_OUTPUT}"',
+            text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
